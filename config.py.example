@@ -1,0 +1,4 @@
+api_owner_pass = "abcxyz"
+bot_owner_ids = [000, 111]
+bot_prefix = ".."
+bot_token = "toucan"
