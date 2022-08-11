@@ -1,0 +1,8 @@
+{
+    "master_keys": {
+        "user_id": "master_key",
+    },
+    "guild_ids": [], ## Guilds where the discord bot's slash commands will appear
+    "host_addr": "", ## Address of the API Host
+    "token": "" ## Your discord bot token
+}

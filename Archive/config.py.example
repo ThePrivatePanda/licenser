@@ -1,0 +1,6 @@
+api_owner_pass = "abcxyz"
+bot_owner_ids = [000, 111]
+bot_prefix = ".."
+bot_token = "toucan"
+api_host_v1_ip = "0.0.0.0"
+api_host_v1_port = "50505"
