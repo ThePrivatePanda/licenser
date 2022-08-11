@@ -1,3 +1,5 @@
+import asyncio
+from distutils.command.config import config
 from nextcord import Client, Interaction, SlashOption, Embed, Colour
 import time
 import aiohttp
@@ -7,6 +9,15 @@ from Classes import Config
 
 client = Client()
 
+
+def validate_license_key(license_key: str):
+	try:
+		license_json = json.loads(base64.b64decode(license_key.encode("ascii")).decode("ascii"))
+	except:
+		return False
+	if len([i for i in ["script", "limit_type", "expire_limit", "generation_time"] if i not in license_json.keys()]) > 0:
+		return False
+	return license_json
 
 @client.event
 async def on_ready():
@@ -86,7 +97,33 @@ async def delete_key(
 		required=True
 	)
 ):
-	...
+	if str(interaction.user.id) not in client.config.get("master_keys").values():
+		return await interaction.reply("You are not authorized to use this command")
+
+	license_json = validate_license_key(license_key)
+	if not license_json:
+		return await interaction.reply("Invalid license key")
+
+	delete = await client.session.delete(
+		url=f"http://{client.host_addr}/license/owner/delete",
+		headers={
+			"Authorization": client.config.get("master_keys")[str(interaction.user.id)],
+			"license_key": license_key
+		},
+	)
+
+	if delete.status_code != 204:
+		return await interaction.send(f"Error: {delete.status_code}\n{delete.text}")
+
+	return await interaction.send(embed=Embed(
+		title="License Key Deleted",
+		colour=Colour.red(),
+		description=f"""
+License key: {license_key}
+Reason: {reason}
+"""
+		)
+	)
 
 @client.slash_command(name="update", guild_ids=client.config.get("guild_ids"), description="Update a license key")
 async def update_key(
@@ -100,7 +137,34 @@ async def update_key(
 		required=True
 	)
 ):
-	...
+	if str(interaction.user.id) not in client.config.get("master_keys").values():
+		return await interaction.reply("You are not authorized to use this command")
+
+	license_json = validate_license_key(license_key)
+	if not license_json:
+		return await interaction.reply("Invalid license key")
+
+	update = await client.session.put(
+		url=f"http://{client.host_addr}/license/owner/update",
+		json={"expire_limit": expire_limit},
+		headers={
+			"Authorization": client.config.get("master_keys")[str(interaction.user.id)],
+			"license_key": license_key
+		}
+	)
+
+	if update.status_code != 204:
+		return await interaction.send(f"Error: {update.status_code}\n{update.text}")
+
+	return await interaction.send(embed=Embed(
+		title="License Key Updated",
+		colour=Colour.green(),
+		description=f"""
+License key: {license_key}
+Limit: {expire_limit} {"days" if license_json["limit_type"] == "time_limit" else "accounts"}
+"""
+		)
+	)
 
 @client.slash_command(name="info", guild_ids=client.config.get("guild_ids"), description="Get information about a license key")
 async def info_key(
@@ -110,12 +174,63 @@ async def info_key(
 		required=True
 	)
 ):
-	...
+	license_json = validate_license_key(license_key)
+	if not license_json:
+		return await interaction.reply("Invalid license key")
+	
+	info_req = await client.session.get(
+		url=f"http://{client.host_addr}/license/user/validate",
+		headers={"license_key": license_key},
+		json={"hwid": "bypass", "script": "bypass"}
+	)
+
+	return await interaction.send(embed=Embed(
+		title="License Key Information",
+		colour=Colour.green(),
+		description=f"""
+License key: {license_key}
+Script: {license_json["script"]}
+Limit type: {license_json["limit_type"]}
+Initial Limit: {license_json["expire_limit"]} {"days" if license_json["limit_type"] == "time_limit" else "accounts"}
+Limit Left: {info_req.json()[0]["expire_limit"]} {"days" if license_json["limit_type"] == "time_limit" else "accounts"}
+Generation time: {license_json["generation_time"]}
+"""
+		)
+	)
 
 @client.slash_command(name="purge_database", guild_ids=client.config.get("guild_ids"), description="COMPLETELY Purge the database of all license keys")
 async def purge_database(interaction: Interaction):
-	...
+	if str(interaction.user.id) not in client.config.get("master_keys").values():
+		return await interaction.reply("You are not authorized to use this command")
+	
+	other_user = [i for i in config.get("master_keys").keys() if i != str(interaction.user.id)][0]
 
+	await interaction.channel.send(f"<@{other_user}> send `agree` if you wish to continue with this action. You have 5 minutes.")
+	def check(m):
+		m.channel.id == interaction.channel.id and m.author.id == int(other_user) and m.content.lower() == "agree"
+
+	try:
+		msg = await client.wait_for("message", check=check, timeout=60*5)
+	except asyncio.TimeoutError:
+		return await interaction.reply("No response from other admin. Aborting.")
+
+
+	purge = await client.session.delete(
+		url=f"http://{client.host_addr}/license/owner/purge",
+		headers={
+			"Authorization": "".join(list(config.get("master_keys").values()))
+		}
+	)
+
+	if purge.status_code != 204:
+		return await interaction.send(f"Error: {purge.status_code}\n{purge.text}")
+
+	return await interaction.send(embed=Embed(
+		title="Database Purged",
+		colour=Colour.red(),
+		description="The database has been purged"
+		)
+	)
 
 async def startup():
 	client.config = Config("config.json")

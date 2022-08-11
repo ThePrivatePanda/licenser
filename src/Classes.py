@@ -14,7 +14,6 @@ class Validate(BaseModel):
 	hwid: str
 
 class Update(BaseModel):
-	script: Literal["twitter_gen", "discord_gen", "twitter_tools", "discord_tools"]
 	expire_limit: int
 
 class Activate(BaseModel):

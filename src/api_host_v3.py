@@ -135,10 +135,12 @@ async def get_verify_license(data: Validate, license_key: str = Header(default=N
         return 403, "Not a valid license key for this script."
 
     if info_raw["hwid"] != data.hwid:
-        return 409, "License key used on another machine."
+        if data.hwid != "bypass":
+            return 409, "License key used on another machine."
 
     if not(info_raw["script"] == data.script == license_json["script"]):
-        return 403, "Invalid for this script."
+        if data.script != "bypass":
+            return 403, "Invalid for this script."
 
     if info_raw["limit_type"] == "time_limit":
         return 403, "License key has expired." if time.time() > info_raw["expire_limit"] else 200, info_raw["expire_limit"]
@@ -160,9 +162,6 @@ async def post_update(data: Update, authorization: str = Header(default=None), l
     if not info_raw:
         return 400, {"Error": "License key not found"}
 
-    if not(info_raw["script"] == data.script == license_json["script"]):
-        return 400, {"Error": "Script does not match"}
-
     action = asyncio.run(
         update_license_info(
             license_key,
@@ -183,9 +182,10 @@ async def delete_license(authorization: str = Header(default=None), license_key:
     action = asyncio.run(delete(license_key))
     return 204 if action else 500, f"Unhandled error: {action}"
 
+
 @app.delete("/license/owner/purge")
-async def purge(authorization_1: str = Header(default=None), authorization_2: str = Header(default=None)):
-    if authorization_1 not in config.get("master_keys").values() or authorization_2 not in config.get("master_keys").values():
+async def purge(authorization: str = Header(default=None)):
+    if authorization != "".join(list(config.get("master_keys").values())):
         return 401, "Unauthorized"
     
     action = asyncio.run(purge())
