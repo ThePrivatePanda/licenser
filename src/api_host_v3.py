@@ -3,7 +3,7 @@ from fastapi import FastAPI, Header, Response, status
 import aiosqlite
 import time
 from Classes import New, Activate, Validate, Update, Config
-import asyncio
+import uuid
 
 config = Config("config.json")
 app = FastAPI()
@@ -62,15 +62,16 @@ async def purge_db():
         return e
 
 @app.put("/license/owner/register")
-async def put_register(response: Response, data: New = None, authorization: str = Header(default=None), license_key: str = Header(default=None)):
+async def put_register(response: Response, data: New = None, authorization: str = Header(default=None)):
     ## Here, in data, expire_limit should be seconds in which it gets invalidated or the amount of more accounts the user can create
-    if None in [data, authorization, license_key]:
+    if None in [data, authorization]:
         response.status_code = status.HTTP_400_BAD_REQUEST
         return {"error": "Missing data"}
 
     if authorization not in config.get("master_keys").values():
         response.status_code = status.HTTP_401_UNAUTHORIZED
         return {"error": "Unauthorized"}
+    license_key = str(uuid.uuid4())
 
     action = await update_license_info(
         license_key=license_key,
@@ -81,7 +82,7 @@ async def put_register(response: Response, data: New = None, authorization: str 
         )
     if action is True:
         response.status_code = status.HTTP_201_CREATED
-        return
+        return {"license_key": license_key}
     else:
         response.status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
         return {"error": action}
@@ -231,10 +232,12 @@ async def post_update(response: Response, data: Update=None, authorization: str 
     if not info_raw:
         response.status_code = status.HTTP_404_NOT_FOUND
         return {"error": "License not found"}
-
+    old_limit = info_raw["expire_limit"]
     expire_limit = data.expire_limit
     if info_raw["limit_type"] == "time_limit":
-        expire_limit = int(time.time()+data.expire_limit)
+        expire_limit = old_limit + (expire_limit*86400)
+    else:
+        expire_limit = old_limit + expire_limit
 
     action = await (
         update_license_info(
@@ -249,8 +252,8 @@ async def post_update(response: Response, data: Update=None, authorization: str 
         response.status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
         return {"error": action}
 
-    response.status_code = status.HTTP_204_NO_CONTENT
-    return {"success": True}
+    response.status_code = status.HTTP_202_ACCEPTED
+    return {"expire_limit": expire_limit}
 
 
 @app.delete("/license/owner/delete")
@@ -263,13 +266,18 @@ async def delete_license(response: Response, authorization: str = Header(default
         response.status_code = status.HTTP_401_UNAUTHORIZED
         return {"error": "Unauthorized"}
 
+    license_details_raw = await (await app.db.execute("SELECT * FROM licenses WHERE license_key = ?", (license_key, ))).fetchone()
+    if not license_details_raw:
+        response.status_code = status.HTTP_404_NOT_FOUND
+        return {"error": "License not found"}
+
     action = await delete(license_key)
     if not action:
         response.status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
         return {"error": action}
 
     response.status_code = status.HTTP_204_NO_CONTENT
-    return {"success": True}
+    return
 
 @app.delete("/license/owner/purge")
 async def purge(response: Response, authorization: str = Header(default=None)):
@@ -281,10 +289,10 @@ async def purge(response: Response, authorization: str = Header(default=None)):
         response.status_code = status.HTTP_401_UNAUTHORIZED
         return {"error": "Unauthorized"}
     
-    action = await (purge())
+    action = await (purge_db())
     if not action:
         response.status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
         return {"error": action}
     else:
         response.status_code = status.HTTP_204_NO_CONTENT
-        return {"success": True}
+        return 
