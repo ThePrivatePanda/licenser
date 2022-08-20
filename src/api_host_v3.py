@@ -1,25 +1,30 @@
 from typing import Literal
-from fastapi import FastAPI, Header
+from fastapi import FastAPI, Header, Response, status
 import aiosqlite
-import asyncio
 import time
-import base64
-import json
 from Classes import New, Activate, Validate, Update, Config
+import asyncio
 
 config = Config("config.json")
-
-
 app = FastAPI()
 
+@app.on_event("startup")
+async def startup_event():
+    app.db = await aiosqlite.connect("licenses.sqlite3")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    await app.db.close()
+
+async def get_all_licenses():
+    licenses = await(await app.db.execute("SELECT * FROM licenses")).fetchall()
+    return licenses if len(license) > 0 else [["basic", "None", "None", "None", "None"]]
+
 async def get_license_info(license_key: str):
-    db = await aiosqlite.connect("licenses.sqlite3")
-    license_details_raw = await (
-        await db.execute("SELECT * FROM licenses WHERE license_key = ?", (license_key,))
-    ).fetchone()
+    license_details_raw = await (await app.db.execute("SELECT * FROM licenses WHERE license_key = ?", (license_key, ))).fetchone()
 
     if not license_details_raw:
-        return False
+        return None
 
     license_details = {
         "limit_type": license_details_raw[1],
@@ -31,88 +36,78 @@ async def get_license_info(license_key: str):
 
 
 async def update_license_info(license_key: str, limit_type: Literal["time_limit", "accounts_limit"], script: Literal["twitter_gen", "discord_gen", "twitter_tools", "discord_tools"], hwid: str, expire_limit: int):
-    db = await aiosqlite.connect("licenses.sqlite3")
+    ## here, expire limit should either be epoch time when it gets invalidated or the amount of more accounts the user can create
+    ## It can be total time of validation incase of a new registration
     try:
-        await db.execute("DELETE FROM licenses WHERE license_key = ?", (license_key,))
-        await db.execute(
-            "INSERT INTO licenses (license_key, limit_type, script, hwid, expire_limit) VALUES(?, ?, ?, ?)",
-            (license_key, limit_type, script, hwid, expire_limit),
-        )
-        await db.commit()
+        await app.db.execute("INSERT OR REPLACE INTO licenses (license_key, limit_type, script, hwid, expire_limit) VALUES(?, ?, ?, ?, ?)", (license_key, limit_type, script, hwid, expire_limit))
+        await app.db.commit()
         return True
     except Exception as e:
         return e
 
 async def delete(license_key: str):
-    db = await aiosqlite.connect("licenses.sqlite3")
     try:
-        await db.execute("DELETE FROM licenses WHERE license_key = ?", (license_key,))
-        await db.commit()
+        await app.db.execute("DELETE FROM licenses WHERE license_key = ?", (license_key, ))
+        await app.db.commit()
         return True
     except Exception as e:
         return e
 
 async def purge_db():
-    db = await aiosqlite.connect("licenses.sqlite3")
     try:
-        await db.execute("DELETE FROM licenses;")
-        await db.commit()
+        await app.db.execute("DELETE FROM licenses;")
+        await app.db.commit()
         return True
     except Exception as e:
         return e
 
-def validate_license_key(license_key: str):
-    try:
-        license_json = json.loads(base64.b64decode(license_key.encode("ascii")).decode("ascii"))
-    except:
-        return False
-    return license_json
-
 @app.put("/license/owner/register")
-async def put_register(data: New, authorization: str = Header(default=None), license_key: str = Header(default=None)):
+async def put_register(response: Response, data: New = None, authorization: str = Header(default=None), license_key: str = Header(default=None)):
+    ## Here, in data, expire_limit should be seconds in which it gets invalidated or the amount of more accounts the user can create
+    if None in [data, authorization, license_key]:
+        response.status_code = status.HTTP_400_BAD_REQUEST
+        return {"error": "Missing data"}
+
     if authorization not in config.get("master_keys").values():
-        return 401, "Unauthorized"
+        response.status_code = status.HTTP_401_UNAUTHORIZED
+        return {"error": "Unauthorized"}
 
-    license_json = validate_license_key(license_key)
-    if not license_json:
-        return 400
-
-    if license_json["script"] != data.script or license_key["limit_type"] != data.limit_type or license_key["expire_limit"] != data.expire_limit:
-        return 400, "Key does not match passed data"
-
-    action = asyncio.run(
-        update_license_info(
-            license_key=license_key,
-            limit_type=data.limit_type,
-            script=data.script,
-            hwid="abcxyz",
-            limit=data.expire_limit,
+    action = await update_license_info(
+        license_key=license_key,
+        limit_type=data.limit_type,
+        script=data.script,
+        hwid="abcxyz",
+        expire_limit=data.expire_limit,
         )
-    )
-
-    return 204 if action else 500, f"Unhandled error: {action}"
+    if action is True:
+        response.status_code = status.HTTP_201_CREATED
+        return
+    else:
+        response.status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+        return {"error": action}
 
 
 @app.post("/license/user/activate")
-async def post_activate(data: Activate, license_key: str = Header(default=None)):
-    license_json = validate_license_key()
-    if not license_json:
-        return 400
+async def post_activate(response: Response, data: Activate = None, license_key: str = Header(default=None)):
+    if None in [data, license_key]:
+        response.status_code = status.HTTP_400_BAD_REQUEST
+        return {"error": "Missing data"}
 
-    info_raw = asyncio.run(get_license_info(license_key))
+    info_raw = await (get_license_info(license_key))
     if not info_raw:
-        return 403, "Not a valid license key."
+        response.status_code = status.HTTP_404_NOT_FOUND
+        return {"error": "License not found"}
 
     if info_raw["hwid"] != "abcxyz":
-        return 409, "This license key has already been used on another machine."
-
-    if not(info_raw["script"] == data.script == license_json["script"]):
-        return 403, "Invalid for this script."
+        response.status_code = status.HTTP_409_CONFLICT
+        return {"error": "HWID does not match"}
 
     if info_raw["limit_type"] == "time_limit":
-        expire_limit = int(time.time())
+        expire_limit = int(time.time()) + info_raw["expire_limit"]
+    else:
+        expire_limit = info_raw["expire_limit"]
 
-    action = asyncio.run(
+    action = await (
         update_license_info(
             license_key=license_key,
             limit_type=info_raw["limit_type"],
@@ -122,71 +117,174 @@ async def post_activate(data: Activate, license_key: str = Header(default=None))
         )
     )
 
-    return 204 if action else 500, f"Unhandled error: {action}"
+    if action is True:
+        response.status_code = status.HTTP_202_ACCEPTED
+        return
+    else:
+        response.status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+        return {"error": action}
 
 @app.get("/license/user/validate")
-async def get_verify_license(data: Validate, license_key: str = Header(default=None)):
-    license_json = validate_license_key(license_key)
-    if not license_json:
-        return 400
+async def get_verify_license(response: Response, data: Validate=None, license_key: str = Header(default=None)):
+    if None in [data, license_key]:
+        response.status_code = status.HTTP_400_BAD_REQUEST
+        return {"error": "Missing data"}
 
-    info_raw = asyncio.run(get_license_info(license_key))
+    info_raw = await get_license_info(license_key)
     if not info_raw:
-        return 403, "Not a valid license key for this script."
-
-    if info_raw["hwid"] != data.hwid:
-        if data.hwid != "bypass":
-            return 409, "License key used on another machine."
-
-    if not(info_raw["script"] == data.script == license_json["script"]):
-        if data.script != "bypass":
-            return 403, "Invalid for this script."
+        response.status_code = status.HTTP_404_NOT_FOUND
+        return {"error": "License not found"}
 
     if info_raw["limit_type"] == "time_limit":
-        return 403, "License key has expired." if time.time() > info_raw["expire_limit"] else 200, info_raw["expire_limit"]
+        expire_limit = int(time.time()) + info_raw["expire_limit"]
+    else:
+        expire_limit = info_raw["expire_limit"]
+
+    if info_raw["hwid"] == "abcxyz":
+        action = await update_license_info(
+            license_key=license_key,
+            limit_type=info_raw["limit_type"],
+            script=info_raw["script"],
+            hwid=data.hwid,
+            expire_limit=expire_limit,
+        )
+
+        if action is True:
+            response.status_code = status.HTTP_202_ACCEPTED
+            return
+        else:
+            response.status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+            return {"error": action}
+    elif info_raw["hwid"] == data.hwid:
+        pass
+    else:
+        response.status_code = status.HTTP_409_CONFLICT
+        return {"error": "HWID does not match"}
+
+    if info_raw["limit_type"] == "time_limit":
+        expired = time.time() > expire_limit
+        if expired:
+            response.status_code = status.HTTP_402_PAYMENT_REQUIRED
+            return {"error": "License expired"}
+        else:
+            response.status_code = status.HTTP_201_OK
 
     elif info_raw["limit_type"] == "accounts_limit":
-        return 403, "License key accounts allowance is finished." if info_raw["expire_limit"] <= 0 else 200, info_raw["expire_limit"]
+        if info_raw["expire_limit"] > 0:
+            response.status_code = status.HTTP_201_OK
+        else:
+            response.status_code = status.HTTP_402_PAYMENT_REQUIRED
+            return {"error": "License expired"}
 
+
+@app.get("/license/user/info")
+async def get_owner_info(response: Response, license_key: str = Header(default=None)):
+    if not license_key:
+        response.status_code = status.HTTP_400_BAD_REQUEST
+        return {"error": "Missing data"}
+
+    info_raw = await get_license_info(license_key)
+    if not info_raw:
+        response.status_code = status.HTTP_404_NOT_FOUND
+        return {"error": "License not found"}
+
+    response.status_code = status.HTTP_200_OK
+    return {"limit_type": info_raw["limit_type"], "expire_limit": info_raw["expire_limit"]}
+
+@app.get("/license/owner/all")
+async def get_owner_info(response: Response, authorization: str = Header(default=None)):
+    if not authorization:
+        response.status_code = status.HTTP_400_BAD_REQUEST
+        return {"error": "Missing data"}
+
+    if authorization not in config.get("master_keys").values():
+        response.status_code = status.HTTP_401_UNAUTHORIZED
+        return {"error": "Unauthorized"}
+
+    info_raw = await get_all_licenses()
+
+    if len(info_raw) == 1 and info_raw[0][0] == "basic":
+        response.status_code = status.HTTP_410_GONE
+        return {"error": "Empty DB"}
+
+    response.status_code = status.HTTP_200_OK
+    return {"licenses": [{
+        "license_key": i[0], 
+        "limit_type": i[1],
+        "script": i[2],
+        "hwid": i[3],
+        "expire_limit": i[4]
+    }
+    for i in info_raw]}
 
 @app.post("/license/owner/update")
-async def post_update(data: Update, authorization: str = Header(default=None), license_key: str = Header(default=None)):
+async def post_update(response: Response, data: Update=None, authorization: str = Header(default=None), license_key: str = Header(default=None)):
+    if None in [data, authorization, license_key]:
+        response.status_code = status.HTTP_400_BAD_REQUEST
+        return {"error": "Missing data"}
+
     if authorization not in config.get("master_keys").values():
-        return 401, "Unauthorized"
+        response.status_code = status.HTTP_401_UNAUTHORIZED
+        return {"error": "Unauthorized"}
 
-    license_json = validate_license_key(license_key)
-    if not license_json:
-        return 400
-
-    info_raw = asyncio.run(get_license_info(license_key))
+    info_raw = await (get_license_info(license_key))
     if not info_raw:
-        return 400, {"Error": "License key not found"}
+        response.status_code = status.HTTP_404_NOT_FOUND
+        return {"error": "License not found"}
 
-    action = asyncio.run(
+    expire_limit = data.expire_limit
+    if info_raw["limit_type"] == "time_limit":
+        expire_limit = int(time.time()+data.expire_limit)
+
+    action = await (
         update_license_info(
             license_key,
             info_raw["limit_type"],
             info_raw["script"],
             info_raw["hwid"],
-            data.expire_limit
+            expire_limit
         )
     )
-    return 204 if action else 500, f"Unhandled error: {action}"
+    if not action:
+        response.status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+        return {"error": action}
+
+    response.status_code = status.HTTP_204_NO_CONTENT
+    return {"success": True}
 
 
 @app.delete("/license/owner/delete")
-async def delete_license(authorization: str = Header(default=None), license_key: str = Header(default=None)):
+async def delete_license(response: Response, authorization: str = Header(default=None), license_key: str = Header(default=None)):
+    if None in [authorization, license_key]:
+        response.status_code = status.HTTP_400_BAD_REQUEST
+        return {"error": "Missing data"}
+
     if authorization not in config.get("master_keys").values():
-        return 401, "Unauthorized"
+        response.status_code = status.HTTP_401_UNAUTHORIZED
+        return {"error": "Unauthorized"}
 
-    action = asyncio.run(delete(license_key))
-    return 204 if action else 500, f"Unhandled error: {action}"
+    action = await delete(license_key)
+    if not action:
+        response.status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+        return {"error": action}
 
+    response.status_code = status.HTTP_204_NO_CONTENT
+    return {"success": True}
 
 @app.delete("/license/owner/purge")
-async def purge(authorization: str = Header(default=None)):
+async def purge(response: Response, authorization: str = Header(default=None)):
+    if not authorization:
+        response.status_code = status.HTTP_400_BAD_REQUEST
+        return {"error": "Missing data"}
+
     if authorization != "".join(list(config.get("master_keys").values())):
-        return 401, "Unauthorized"
+        response.status_code = status.HTTP_401_UNAUTHORIZED
+        return {"error": "Unauthorized"}
     
-    action = asyncio.run(purge())
-    return 204 if action else 500, f"Unhandled error: {action}"
+    action = await (purge())
+    if not action:
+        response.status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+        return {"error": action}
+    else:
+        response.status_code = status.HTTP_204_NO_CONTENT
+        return {"success": True}
