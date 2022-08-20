@@ -4,13 +4,11 @@ import json
 
 
 class New(BaseModel):
-	limit_type: Literal["time_limit", "accounts_limit"]
 	script: Literal["twitter_gen", "discord_gen", "twitter_tools", "discord_tools"]
+	limit_type: Literal["time_limit", "accounts_limit"]
 	expire_limit: int
-	generation_time: int
 
 class Validate(BaseModel):
-	script: Literal["twitter_gen", "discord_gen", "twitter_tools", "discord_tools"]
 	hwid: str
 
 class Update(BaseModel):
